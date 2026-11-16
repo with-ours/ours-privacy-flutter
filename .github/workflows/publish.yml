@@ -1,0 +1,245 @@
+# Publishes ours_privacy to pub.dev with GitHub OIDC (no long-lived secret).
+#
+# pub.dev accepts an OIDC token only from a run started by a `push` or
+# `workflow_dispatch` event whose ref is a tag matching the package's tag
+# pattern (refs/tags/v<pubspec version>). A pull_request run can never
+# publish, and a tag pushed with GITHUB_TOKEN does not start another
+# workflow. So a merged `release: X.Y.Z` PR runs the CI gates on the merge
+# commit, creates tag vX.Y.Z there, and dispatches this workflow on that tag.
+# A maintainer can also publish an existing tag by pushing it or by running
+# `gh workflow run publish.yml --ref vX.Y.Z`.
+#
+# One-time setup:
+# 1. An uploader publishes the first version by hand with
+#    `flutter pub publish` from a clean checkout of the public repository;
+#    pub.dev cannot create a new package from automation.
+# 2. Transfer the package to the Ours Privacy verified publisher.
+# 3. On pub.dev, package Admin > Automated publishing: enable publishing from
+#    GitHub Actions for repository `with-ours/ours-privacy-flutter` with tag
+#    pattern `v{{version}}`; keep "push events" enabled and enable
+#    "workflow_dispatch events"; enable "Require GitHub Actions environment"
+#    with environment `pub.dev`.
+# 4. In the GitHub repository, create the `pub.dev` environment (optionally
+#    with required reviewers) and protect `v*` tags with a ruleset so only
+#    maintainers and this workflow can create them.
+#
+# Docs: https://dart.dev/tools/pub/automated-publishing
+
+name: Publish
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions: {}
+
+# Keyed by ref so closing an unrelated PR never cancels a queued tag run.
+# The prefix must differ from ci.yml's group, which inherits this workflow's
+# name when called; equal groups would deadlock.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Release PR merged: read the version from the title and pin the merge commit.
+  release-plan:
+    name: Plan release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event.repository.private == false &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.title, 'release:')
+    permissions: {}
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - name: Extract version and merge commit
+        id: plan
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          RELEASE_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          VERSION="$(printf '%s\n' "$PR_TITLE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+          if [ -z "$VERSION" ]; then
+            echo "Could not extract a version from the PR title" >&2
+            exit 1
+          fi
+          if ! [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Missing merge commit SHA" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$RELEASE_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION from $RELEASE_COMMIT"
+
+  # Every CI gate on the merge commit, without any write or OIDC permission.
+  release-ci:
+    name: Release checks
+    needs: release-plan
+    if: github.event.repository.private == false
+    permissions:
+      contents: read
+    uses: $/.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.release-plan.outputs.sha }}
+      release-version: ${{ needs.release-plan.outputs.version }}
+
+  # Tag the merge commit, then start this workflow on the tag so pub.dev
+  # accepts the run. The tag push itself starts nothing (GITHUB_TOKEN).
+  release-tag:
+    name: Tag release and dispatch publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [release-plan, release-ci]
+    if: github.event.repository.private == false
+    concurrency:
+      group: release-tag-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write # create the release tag
+      actions: write # dispatch publish.yml on the tag
+    steps:
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.release-plan.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.release-plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)"; then
+            # An annotated tag points at a tag object; resolve it to its commit.
+            TYPE="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type')"
+            if [ "$TYPE" = tag ]; then
+              EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$EXISTING" --jq '.object.sha')"
+            fi
+            if [ "$EXISTING" != "$RELEASE_COMMIT" ]; then
+              echo "$TAG already exists at $EXISTING, not $RELEASE_COMMIT" >&2
+              exit 1
+            fi
+            echo "$TAG already points at $RELEASE_COMMIT"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f "ref=refs/tags/$TAG" \
+              -f "sha=$RELEASE_COMMIT" >/dev/null
+            echo "Created $TAG at $RELEASE_COMMIT"
+          fi
+
+      - name: Dispatch publish on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.release-plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "Dispatched publish.yml on $TAG"
+
+  # Tag run: the same CI gates on the tagged commit, without OIDC permission.
+  verify:
+    name: Verify tag
+    if: >-
+      github.event.repository.private == false &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    uses: $/.github/workflows/ci.yml
+    with:
+      release-version: ${{ github.ref_name }}
+
+  # Only a commit already on the default branch may be published, even when
+  # a tag is pushed by hand or the tag ruleset is missing.
+  on-main:
+    name: Check tag is on the default branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event.repository.private == false &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require the tagged commit to be on the default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on $DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME ($GITHUB_SHA) is on $DEFAULT_BRANCH"
+
+  # Minimal job holding the OIDC token: no project code runs here; the
+  # publish step resolves dependencies (download only) and uploads the
+  # archive.
+  publish:
+    name: Publish to pub.dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [verify, on-main]
+    if: github.event.repository.private == false
+    environment: pub.dev
+    concurrency:
+      group: pub-dev-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchanged with pub.dev at publish time
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Flutter from its release tag. subosito/flutter-action references an
+      # unpinned actions/cache, which the org's SHA-pinning policy rejects.
+      - name: Install Flutter 3.50.0
+        env:
+          FLUTTER_VERSION: '3.50.0'
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --no-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+
+      # Requests the short-lived pub.dev OIDC token and registers it with
+      # `dart pub token add`, which Flutter's pub reads too. It runs last so
+      # the token is fresh when the upload starts. `flutter` stays on PATH.
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+
+      - name: Publish
+        run: flutter pub publish --force
+
+  github-release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: publish
+    if: github.event.repository.private == false
+    permissions:
+      contents: write # create the GitHub release
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes
+          fi

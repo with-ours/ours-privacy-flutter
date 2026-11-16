@@ -1,0 +1,34 @@
+# A .pubignore replaces .gitignore for this directory when pub builds the
+# archive, so the .gitignore entries are repeated here.
+.DS_Store
+*~
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+coverage/
+.idea/
+*.iml
+.vscode/
+.flutter-plugins
+.flutter-plugins-dependencies
+/pubspec.lock
+*.capture.jsonl
+.superpowers/
+
+# Repository-only files that are not part of the package.
+/.github/
+/tool/
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.claude/
+/.codex/
+/.sdk-release/
+/.public-release-ignore
+/docs/superpowers/
+/example/build/
+/example/.dart_tool/
+/example/integration_test/
+/example/test/

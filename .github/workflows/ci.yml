@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  # publish.yml runs these same gates on the exact commit it releases.
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check out (defaults to the triggering ref)
+        type: string
+        required: false
+        default: ''
+      release-version:
+        description: Release version that every version declaration must match
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  sdk:
+    name: SDK (Flutter stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      # Flutter from its release tag. subosito/flutter-action references an
+      # unpinned actions/cache, which the org's SHA-pinning policy rejects.
+      - name: Install Flutter 3.50.0
+        env:
+          FLUTTER_VERSION: '3.50.0'
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --no-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+      - run: flutter --version
+      - run: flutter pub get
+      - name: Format
+        run: dart format --output=none --set-exit-if-changed lib test
+      - name: Analyze
+        run: flutter analyze --fatal-infos lib test
+      - name: Test
+        run: flutter test
+      - name: Package validation
+        run: flutter pub publish --dry-run
+
+  sdk-floor:
+    name: SDK (Flutter 3.13.9, lowest dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      # Flutter from its release tag. subosito/flutter-action references an
+      # unpinned actions/cache, which the org's SHA-pinning policy rejects.
+      - name: Install Flutter 3.13.9
+        env:
+          FLUTTER_VERSION: '3.13.9'
+        # Flutter 3.13 has no --disable-analytics flag; config persists it.
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --no-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+      - run: flutter --version
+      # Resolve the lowest versions the pubspec allows, so the declared floor
+      # (for example shared_preferences 2.2.x and http 1.1.0) stays honest.
+      # The example app needs a newer Flutter, so it is not resolved here,
+      # and --no-pub keeps analyze and test from resolving it either.
+      - run: flutter pub downgrade --no-example
+      # Infos are style-only and depend on the lint package version; the floor
+      # job checks that the SDK compiles and behaves on the oldest toolchain.
+      - name: Analyze
+        run: flutter analyze --no-pub --no-fatal-infos lib test
+      - name: Test
+        run: flutter test --no-pub
+
+  example-android:
+    name: Example (Android debug build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: example
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: 17
+      # Flutter from its release tag. subosito/flutter-action references an
+      # unpinned actions/cache, which the org's SHA-pinning policy rejects.
+      - name: Install Flutter 3.50.0
+        env:
+          FLUTTER_VERSION: '3.50.0'
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --no-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+      - run: flutter pub get
+      - name: Format example app
+        run: dart format --output=none --set-exit-if-changed lib
+      - name: Analyze example app
+        run: flutter analyze --fatal-infos lib
+      - run: flutter build apk --debug
+
+  example-ios:
+    name: Example (iOS simulator build)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: example
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      # Flutter from its release tag. subosito/flutter-action references an
+      # unpinned actions/cache, which the org's SHA-pinning policy rejects.
+      - name: Install Flutter 3.50.0
+        env:
+          FLUTTER_VERSION: '3.50.0'
+        run: |
+          git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/flutter/bin/flutter" config --no-analytics
+          "$RUNNER_TEMP/flutter/bin/flutter" --version
+      - run: flutter pub get
+      - run: flutter build ios --simulator --debug
+
+  version:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref }}
+      - name: Check pubspec, SDK constant, and changelog versions
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
+        run: |
+          if [ -n "$RELEASE_VERSION" ]; then
+            python3 .github/scripts/check-version.py "$RELEASE_VERSION"
+          else
+            python3 .github/scripts/check-version.py
+          fi
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [sdk, sdk-floor, example-android, example-ios, version]
+    if: always()
+    steps:
+      - name: Require SDK, example, and version checks
+        env:
+          SDK_RESULT: ${{ needs.sdk.result }}
+          FLOOR_RESULT: ${{ needs.sdk-floor.result }}
+          ANDROID_RESULT: ${{ needs.example-android.result }}
+          IOS_RESULT: ${{ needs.example-ios.result }}
+          VERSION_RESULT: ${{ needs.version.result }}
+        run: |
+          for result in "$SDK_RESULT" "$FLOOR_RESULT" "$ANDROID_RESULT" "$IOS_RESULT" "$VERSION_RESULT"; do
+            test "$result" = success
+          done
