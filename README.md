@@ -724,7 +724,7 @@ The SDK sends a JSON body to `POST /ingest` on the configured `serverURL`. This 
         "device_model": "iPhone16,1",
         "screen_width": 393,
         "screen_height": 852,
-        "version": "flutter@1.0.0",
+        "version": "flutter@1.0.1",
         "sid": "1791201600000"
       }
     }

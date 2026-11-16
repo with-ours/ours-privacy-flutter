@@ -2,7 +2,7 @@ name: ours_privacy
 description: >-
   Official Ours Privacy analytics SDK for Flutter apps on iOS and Android:
   events, identity, consent, sessions, screens, and deep-link attribution.
-version: 1.0.0
+version: 1.0.1
 homepage: https://oursprivacy.com
 repository: https://github.com/with-ours/ours-privacy-flutter
 issue_tracker: https://github.com/with-ours/ours-privacy-flutter/issues

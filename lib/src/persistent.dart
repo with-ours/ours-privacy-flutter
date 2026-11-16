@@ -57,6 +57,12 @@ class OursPrivacyPersistent {
 
   final Map<String, String?> _visitorId = {};
   final Set<String> _identityLoaded = {};
+  final Map<String, List<String>> _authoritativeVisitorIds = {};
+  // The visitor last read from or written to storage, and whether it is
+  // stored as authoritative. Authority lists are built from this, not from
+  // the in-memory visitor, which can be ahead of storage after a failed write.
+  final Map<String, String> _durableVisitorId = {};
+  final Map<String, bool> _durableIsManuallySetId = {};
   final Map<String, bool> _existingInstall = {};
   final Map<String, bool> _optedOut = {};
   final Map<String, bool> _optOutLoaded = {};
@@ -90,13 +96,22 @@ class OursPrivacyPersistent {
       await storageAdapter.setItemStrict(mobileInstallKey(token), installation);
     }
     _existingInstall[token] = installation == mobileInstallLegacy;
+    final hasVisitor = visitorId != null && visitorId.isNotEmpty;
+    final authority = hasVisitor
+        ? _decodeAuthority(
+            await storageAdapter.getItemStrict(isManuallySetIdKey(token)),
+            visitorId)
+        : const <String>[];
     _identityLoaded.add(token);
     _visitorId[token] = visitorId;
-    if (visitorId == null || visitorId.isEmpty) {
+    _authoritativeVisitorIds[token] = authority;
+    if (!hasVisitor) {
       final created = uuidv4();
       _visitorId[token] = created;
       await storageAdapter.setItemStrict(visitorIdKey(token), created);
     }
+    _durableVisitorId[token] = _visitorId[token]!;
+    _durableIsManuallySetId[token] = getIsManuallySetId(token);
     OursPrivacyLogger.log(token, 'visitorId: ${_visitorId[token]}');
   }
 
@@ -111,6 +126,65 @@ class OursPrivacyPersistent {
   /// The current visitor ID, or null before identity has loaded.
   String? getVisitorId(String token) =>
       _identityLoaded.contains(token) ? _visitorId[token] : null;
+
+  /// True when the current visitor was set explicitly or by [reset], so
+  /// events carry `is_manually_set_id: true`. Restored on load only when the
+  /// loaded visitor is in the stored authority list.
+  bool getIsManuallySetId(String token) {
+    final visitorId = _visitorId[token];
+    return visitorId != null &&
+        (_authoritativeVisitorIds[token] ?? const []).contains(visitorId);
+  }
+
+  static List<String> _decodeAuthority(String? stored, String visitorId) {
+    if (stored == null) return const [];
+    if (stored == 'true') return [visitorId];
+    final decoded = jsonDecode(stored);
+    if (decoded is Map && decoded['visitorIds'] is List) {
+      return [for (final id in decoded['visitorIds'] as List) '$id'];
+    }
+    throw const OursPrivacyException('Invalid stored visitor authority');
+  }
+
+  /// The authority list for a move from the stored visitor to [next]: the
+  /// stored visitor stays listed only when it is itself stored as
+  /// authoritative, so a failed visitor write still reloads it with its own
+  /// mode. It comes from storage, not memory, so repeated failures can't drop
+  /// the stored visitor's authority.
+  List<String> _authorityFor(String token, String next) {
+    final durable = _durableVisitorId[token];
+    return durable != null &&
+            durable != next &&
+            _durableIsManuallySetId[token] == true
+        ? [durable, next]
+        : [next];
+  }
+
+  Future<void> _writeAuthoritativeVisitor(
+      String token, String visitorId, List<String> authority) async {
+    await storageAdapter.setItemStrict(
+        isManuallySetIdKey(token), jsonEncode({'visitorIds': authority}));
+    await storageAdapter.setItemStrict(visitorIdKey(token), visitorId);
+    _durableVisitorId[token] = visitorId;
+    _durableIsManuallySetId[token] = true;
+  }
+
+  /// Commits an explicitly chosen visitor ID ([OursPrivacy.setVisitorId],
+  /// the `visitorId` init option, or a deep link) with its authority, so a
+  /// cold restart keeps sending it as manually set. A storage failure is
+  /// logged and the new identity applies until the app restarts.
+  Future<void> setExplicitVisitorId(String token, String visitorId) async {
+    final authority = _authorityFor(token, visitorId);
+    _identityLoaded.add(token);
+    _visitorId[token] = visitorId;
+    _authoritativeVisitorIds[token] = authority;
+    try {
+      await _writeAuthoritativeVisitor(token, visitorId, authority);
+    } catch (_) {
+      OursPrivacyLogger.error(
+          token, 'error saving visitor ID; it applies until the app restarts');
+    }
+  }
 
   /// Updates the in-memory visitor ID; call [persistVisitorId] to save it.
   void updateVisitorId(String token, String visitorId) {
@@ -276,11 +350,16 @@ class OursPrivacyPersistent {
       storageAdapter.setItemStrict(
           queueMetadataKey(token, type), jsonEncode(metadata));
 
-  /// Forgets the visitor ID (unless [preserveVisitorId]) and loads a new one.
+  /// Replaces the visitor ID (unless [preserveVisitorId]) with a new,
+  /// authoritative one. A failed write throws and keeps the current
+  /// identity, in memory and on reload.
   Future<void> reset(String token, {bool preserveVisitorId = false}) async {
     if (!preserveVisitorId) {
-      await storageAdapter.removeItem(visitorIdKey(token));
-      await loadIdentity(token);
+      final visitorId = uuidv4();
+      final authority = _authorityFor(token, visitorId);
+      await _writeAuthoritativeVisitor(token, visitorId, authority);
+      _visitorId[token] = visitorId;
+      _authoritativeVisitorIds[token] = authority;
     }
   }
 }

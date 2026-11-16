@@ -1918,4 +1918,300 @@ void main() {
 
     expect(h.requests, isEmpty);
   });
+
+  group('visitor identity authority', () {
+    // `is_manually_set_id: false` lets ingest replace the visitor through a
+    // cookie or probabilistic match, so an explicit or reset visitor must
+    // keep `true` across a cold restart (as on Android, iOS and React Native).
+    Future<OursPrivacy> restartAndTrack(
+        String token, FacadeStorage storage, String event) async {
+      await h.restart();
+      h.suspendPeriodicNetworkFlush(token);
+      h.respond = facadeIndexedSuccess;
+      final reloaded = h.create();
+      await reloaded.init(token, storage: storage);
+      await reloaded.track(event);
+      await reloaded.flush();
+      return reloaded;
+    }
+
+    List<Map<String, Object?>> sent() => [
+          for (final body in h.bodies)
+            for (final item in body['data']! as List<Object?>)
+              {
+                'event': facadeMap(item)['event'],
+                'visitor_id': facadeMap(item)['visitor_id'],
+                'is_manually_set_id': body['is_manually_set_id'],
+              },
+        ];
+
+    test('sends the reset visitor as manually set, before and after restart',
+        () async {
+      const token = 'reset-authority-token';
+      final storage = FacadeStorage();
+      h.suspendPeriodicNetworkFlush(token);
+      h.respond = facadeIndexedSuccess;
+      final op = h.create();
+      await op.init(token, storage: storage);
+      final initialVisitor = op.getVisitorId();
+      await op.track('before_reset');
+      await op.reset();
+      final resetVisitor = op.getVisitorId();
+      expect(resetVisitor, isNot(initialVisitor));
+      await op.track('after_reset');
+      await op.flush();
+
+      final reloaded = await restartAndTrack(token, storage, 'after_restart');
+
+      expect(reloaded.getVisitorId(), resetVisitor);
+      expect(sent(), [
+        {
+          'event': 'before_reset',
+          'visitor_id': initialVisitor,
+          'is_manually_set_id': false,
+        },
+        {
+          'event': 'after_reset',
+          'visitor_id': resetVisitor,
+          'is_manually_set_id': true,
+        },
+        {
+          'event': 'after_restart',
+          'visitor_id': resetVisitor,
+          'is_manually_set_id': true,
+        },
+      ]);
+    });
+
+    test('keeps a fresh install automatic after restart', () async {
+      const token = 'automatic-restart-token';
+      final storage = FacadeStorage();
+      final op = h.create();
+      await op.init(token, storage: storage);
+      final visitor = op.getVisitorId();
+
+      await restartAndTrack(token, storage, 'after_restart');
+
+      expect(sent(), [
+        {
+          'event': 'after_restart',
+          'visitor_id': visitor,
+          'is_manually_set_id': false,
+        },
+      ]);
+    });
+
+    for (final source in [
+      'setVisitorId',
+      'init visitorId option',
+      'deep link',
+      'reset then setVisitorId',
+    ]) {
+      test('keeps explicit visitor authority across restart after $source',
+          () async {
+        const token = 'explicit-restart-token';
+        const explicitVisitor = 'explicit-visitor';
+        final storage = FacadeStorage();
+        final op = h.create();
+        if (source == 'init visitorId option') {
+          await op.init(token, storage: storage, visitorId: explicitVisitor);
+        } else {
+          await op.init(token, storage: storage);
+        }
+        if (source == 'setVisitorId') await op.setVisitorId(explicitVisitor);
+        if (source == 'deep link') {
+          await op
+              .trackDeepLink('myapp://open?ours_visitor_id=$explicitVisitor');
+        }
+        if (source == 'reset then setVisitorId') {
+          await op.reset();
+          await op.setVisitorId(explicitVisitor);
+        }
+        expect(op.getVisitorId(), explicitVisitor);
+
+        final reloaded = await restartAndTrack(token, storage, 'after_restart');
+
+        expect(reloaded.getVisitorId(), explicitVisitor);
+        expect(
+            sent(),
+            contains(equals({
+              'event': 'after_restart',
+              'visitor_id': explicitVisitor,
+              'is_manually_set_id': true,
+            })));
+      });
+    }
+
+    for (final (failedWrite, source, restoredMode) in [
+      ('authority', 'automatic', false),
+      ('authority', 'explicit', true),
+      ('visitor', 'automatic', false),
+      ('visitor', 'explicit', true),
+    ]) {
+      test(
+          'keeps the $failedWrite write predecessor from $source when '
+          'setVisitorId cannot persist', () async {
+        const token = 'explicit-write-failure-token';
+        String? failingKey;
+        final storage = FacadeStorage()
+          ..onSet = (key, value) {
+            if (key == failingKey) throw StateError('$failedWrite failed');
+          };
+        h.suspendPeriodicNetworkFlush(token);
+        h.respond = facadeIndexedSuccess;
+        final op = h.create();
+        await op.init(token, storage: storage);
+        if (source == 'explicit') await op.setVisitorId('first-explicit');
+        final previousVisitor = op.getVisitorId();
+        failingKey = failedWrite == 'authority'
+            ? isManuallySetIdKey(token)
+            : visitorIdKey(token);
+
+        await op.setVisitorId('unsaved-visitor');
+        expect(op.getVisitorId(), 'unsaved-visitor');
+        await op.track('after_unsaved_set');
+        await op.flush();
+        failingKey = null;
+
+        final reloaded = await restartAndTrack(token, storage, 'after_restart');
+
+        expect(reloaded.getVisitorId(), previousVisitor);
+        expect(sent(), [
+          {
+            'event': 'after_unsaved_set',
+            'visitor_id': 'unsaved-visitor',
+            'is_manually_set_id': true,
+          },
+          {
+            'event': 'after_restart',
+            'visitor_id': previousVisitor,
+            'is_manually_set_id': restoredMode,
+          },
+        ]);
+      });
+    }
+
+    for (final source in ['automatic', 'explicit', 'prior-reset']) {
+      for (final firstFailure in ['authority', 'visitor']) {
+        for (final retry in [
+          'same-ID setVisitorId',
+          'new-ID setVisitorId',
+          'reset',
+        ]) {
+          test(
+              'keeps the durable $source predecessor after a failed '
+              '$firstFailure write and a failed $retry', () async {
+            const token = 'repeated-write-failure-token';
+            String? failingKey;
+            final storage = FacadeStorage()
+              ..onSet = (key, value) {
+                if (key == failingKey) throw StateError('write failed');
+              };
+            h.suspendPeriodicNetworkFlush(token);
+            h.respond = facadeIndexedSuccess;
+            final op = h.create();
+            await op.init(token, storage: storage);
+            if (source == 'explicit') await op.setVisitorId('first-explicit');
+            if (source == 'prior-reset') await op.reset();
+            final durableVisitor = op.getVisitorId();
+
+            failingKey = firstFailure == 'authority'
+                ? isManuallySetIdKey(token)
+                : visitorIdKey(token);
+            await op.setVisitorId('unsaved-visitor');
+            failingKey = visitorIdKey(token);
+            if (retry == 'same-ID setVisitorId') {
+              await op.setVisitorId('unsaved-visitor');
+            } else if (retry == 'new-ID setVisitorId') {
+              await op.setVisitorId('another-unsaved-visitor');
+            } else {
+              await op.reset();
+              expect(h.logs, contains(startsWith('error: ')));
+            }
+            expect(storage.values[visitorIdKey(token)], durableVisitor);
+            failingKey = null;
+
+            final reloaded = await restartAndTrack(
+              token,
+              storage,
+              'after_restart',
+            );
+
+            expect(reloaded.getVisitorId(), durableVisitor);
+            expect(
+              sent(),
+              contains(
+                equals({
+                  'event': 'after_restart',
+                  'visitor_id': durableVisitor,
+                  'is_manually_set_id': source != 'automatic',
+                }),
+              ),
+            );
+          });
+        }
+      }
+    }
+
+    for (final (failedWrite, source, runtimeMode, restoredMode) in [
+      ('authority', 'automatic', false, false),
+      ('authority', 'explicit', true, true),
+      ('authority', 'prior-reset', true, true),
+      ('visitor', 'automatic', false, false),
+      ('visitor', 'explicit', true, true),
+      ('visitor', 'prior-reset', true, true),
+    ]) {
+      test(
+          'retains the $failedWrite write predecessor from $source after a '
+          'failed reset', () async {
+        const token = 'reset-write-failure-token';
+        String? failingKey;
+        final storage = FacadeStorage()
+          ..onSet = (key, value) {
+            if (key == failingKey) throw StateError('$failedWrite failed');
+          };
+        h.suspendPeriodicNetworkFlush(token);
+        h.respond = facadeIndexedSuccess;
+        final op = h.create();
+        await op.init(token, storage: storage);
+        if (source == 'explicit') await op.setVisitorId('explicit-visitor');
+        if (source == 'prior-reset') await op.reset();
+        final previousVisitor = op.getVisitorId();
+        await op.track('before_failed_reset');
+        failingKey = failedWrite == 'authority'
+            ? isManuallySetIdKey(token)
+            : visitorIdKey(token);
+
+        // The facade logs operation failures instead of throwing.
+        await op.reset();
+        expect(h.logs, contains(startsWith('error: ')));
+        expect(op.getVisitorId(), previousVisitor);
+        expect(storage.values[visitorIdKey(token)], previousVisitor);
+        await op.track('after_failed_reset');
+        await op.flush();
+        failingKey = null;
+
+        final reloaded = await restartAndTrack(token, storage, 'after_restart');
+
+        expect(reloaded.getVisitorId(), previousVisitor);
+        expect(sent(), [
+          {
+            'event': 'before_failed_reset',
+            'visitor_id': previousVisitor,
+            'is_manually_set_id': runtimeMode,
+          },
+          {
+            'event': 'after_failed_reset',
+            'visitor_id': previousVisitor,
+            'is_manually_set_id': runtimeMode,
+          },
+          {
+            'event': 'after_restart',
+            'visitor_id': previousVisitor,
+            'is_manually_set_id': restoredMode,
+          },
+        ]);
+      });
+    }
+  });
 }

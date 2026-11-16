@@ -144,7 +144,7 @@ void main() {
       'device_type': 'mobile',
       'os_name': 'iOS',
       'os_version': '17.5',
-      'version': 'flutter@1.0.0',
+      'version': 'flutter@1.0.1',
       'screen_width': 375,
       'screen_height': 812,
       'device_vendor': 'Apple',

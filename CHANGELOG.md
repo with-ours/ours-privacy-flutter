@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- A visitor ID set with `setVisitorId()`, the `visitorId` option, a deep link, or `reset()` stays marked as manually set after the app restarts.
+
 ## 1.0.0
 
 - Initial release of the Ours Privacy Flutter SDK for iOS and Android apps, written in Dart with no native setup. Requires Flutter 3.13+ (Dart 3.1+).
