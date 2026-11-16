@@ -256,7 +256,7 @@ void main() {
     expect(op.getVisitorId(), isNot('before-reset'));
     expect(op.getVisitorId(), matches(facadeUuidV4));
     expect(h.impl(op).defaultEventProperties('token'), isEmpty);
-    expect(OursPrivacyConfig.instance.getIsManuallySetId('token'), isFalse);
+    expect(OursPrivacyConfig.instance.getIsManuallySetId('token'), isTrue);
   });
 
   test('it calls getVisitorId', () async {

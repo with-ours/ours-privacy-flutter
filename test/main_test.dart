@@ -530,8 +530,8 @@ void main() {
     // persistent.reset(token): a new visitor identity.
     expect(oursprivacyMain.getVisitorId(token), isNot('before-reset'));
     expect(oursprivacyMain.getVisitorId(token), matches(facadeUuidV4));
-    // config.setIsManuallySetId(token, false)
-    expect(config().getIsManuallySetId(token), isFalse);
+    // The reset visitor is authoritative, as on Android, iOS and React Native.
+    expect(config().getIsManuallySetId(token), isTrue);
     expect(oursprivacyMain.defaultEventProperties(token), isEmpty);
     // The user default maps have no getter: the next event has none.
     await oursprivacyMain.track(token, 'after_reset');

@@ -16,6 +16,11 @@ String queueMetadataKey(String token, String type) =>
 // Storage key string kept as-is for compatibility with the other SDKs.
 String visitorIdKey(String token) => 'OURSPRIVACY_${token}_DEVICE_ID';
 
+/// Visitor IDs that are authoritative (`is_manually_set_id: true`), stored
+/// as `{"visitorIds": [...]}`. Same key and shape as React Native.
+String isManuallySetIdKey(String token) =>
+    'OURSPRIVACY_${token}_IS_MANUALLY_SET_ID';
+
 String optOutKey(String token) => 'OURSPRIVACY_${token}_OPT_OUT';
 
 String optOutDecisionKey(String token) =>

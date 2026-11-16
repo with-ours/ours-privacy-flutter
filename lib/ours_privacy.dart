@@ -70,8 +70,8 @@ class OursPrivacy {
   /// - [optOutTrackingByDefault]: start in an opted-out state until the
   ///   visitor makes a choice. Default false.
   /// - [serverURL]: override the ingest endpoint.
-  /// - [visitorId]: pre-set the visitor ID (sets `is_manually_set_id: true`
-  ///   on events tracked in this launch).
+  /// - [visitorId]: pre-set the visitor ID (sets `is_manually_set_id: true`,
+  ///   which persists with it across restarts).
   /// - [initialURL]: deep link URL to parse on init.
   /// - [defaultEventProperties]: merged into every [track] call.
   /// - [defaultUserCustomProperties]: merged into
@@ -314,8 +314,8 @@ class OursPrivacy {
 
   /// Update the visitor ID after initialization. Use this for web-to-app
   /// identity stitching when the visitor ID arrives outside of a deep link.
-  /// Sets `is_manually_set_id: true` on events tracked until the app
-  /// restarts; the visitor ID itself persists.
+  /// Sets `is_manually_set_id: true`; the visitor ID and that flag persist
+  /// across restarts.
   Future<void> setVisitorId(String visitorId) {
     final impl = _requireInit();
     if (!_isValidString(visitorId)) _raiseStringError('visitorId');

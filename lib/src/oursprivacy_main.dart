@@ -289,6 +289,9 @@ class OursPrivacyMain {
 
       await _coreReady;
       await persistent.initializationComplete(token);
+      if (persistent.getIsManuallySetId(token)) {
+        config.setIsManuallySetId(token, true);
+      }
 
       final serverURL =
           options.serverURL != null && options.serverURL!.isNotEmpty
@@ -630,7 +633,7 @@ class OursPrivacyMain {
         await _enqueuePendingFacts(token);
       }
       await persistent.reset(token);
-      config.setIsManuallySetId(token, false);
+      config.setIsManuallySetId(token, true);
       _defaultEventProperties[token] = {};
       _defaultUserCustomProperties[token] = {};
       _defaultUserConsentProperties[token] = {};
@@ -979,8 +982,7 @@ class OursPrivacyMain {
       }
     }
     config.setIsManuallySetId(token, true);
-    persistent.updateVisitorId(token, visitorId);
-    await persistent.persistVisitorId(token);
+    await persistent.setExplicitVisitorId(token, visitorId);
     if (resumeForeground) {
       await _mobileSession.announceRotatedSession();
       await _enqueuePendingFacts(token);
